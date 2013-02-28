@@ -3,74 +3,101 @@ package se.digiplant.grunt;
 import play.Play;
 import play.Logger;
 import play.PlayPlugin;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import play.vfs.VirtualFile;
 
+import java.io.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+/**
+ * Run Grunt on application start in Play dev mode using "grunt run".
+ * Grunt will initially check and compile/minify css and javascript files in grunt.home.
+ * Grunt will check css and javascript files in grunt.home for changes in Play dev mode.
+ * Run grunt dist from grunt.home in command line before deployment.
+ * Set grunt.home in application.conf.
+ * Toggle grunt output with grunt.log in application.conf using values of true or false.
+ * Enable grunt with grunt.enabled in application.conf using values of true or false.
+ * Configure Grunt using Gruntfile.js in grunt.home.
+ */
 public class GruntPlugin extends PlayPlugin {
 
-	private Process gruntProcess;
-	private Thread loggerThread;
-	private final String command = "grunt";
-
-	@Override
-	public void onLoad() {
-		if (Play.mode.isProd())
-			return;
-
-		runGrunt("default");
-
-		Logger.info("Grunt:onLoad");
-	}
+	private Thread gruntThread;
 
     @Override
     public void onApplicationStart() {
-	    if (Play.mode.isProd())
+	    if (Play.mode.isProd() || "false".equals(Play.configuration.getProperty("grunt.enabled", "false")) )
 		    return;
 
-	    gruntProcess = runGrunt("watch");
-
-	    Logger.info("Grunt:onApplicationStart");
+		try {
+			gruntThread = new GruntThread("grunt", "run", "--force");
+			gruntThread.start();
+		} catch (Exception ex) {
+			Logger.error( ex, "[Grunt]" );
+		}
     }
 
     @Override
     public void onApplicationStop() {
-	    if (gruntProcess != null)
-			gruntProcess.destroy();
-
-	    Logger.info("Grunt:onApplicationStop");
+		if( gruntThread != null ){
+			try{
+				gruntThread.interrupt();
+			} catch (Exception ex){}
+		}
     }
 
-	private Process runGrunt(String args) {
-		try {
-			Process p = new ProcessBuilder(command, args).directory(Play.applicationPath).start();
-			inputStreamToOutputStream(p.getErrorStream(), System.out);
-			inputStreamToOutputStream(p.getInputStream(), System.out);
-			p.waitFor();
-		} catch (IOException e) {
-			Logger.fatal("Couldn't find grunt");
-			e.printStackTrace();
-		} catch (InterruptedException e) {
-			Logger.fatal("Interrupted" + e.getMessage());
-			e.printStackTrace();
+
+	class GruntThread extends Thread {
+
+		private Process process;
+		private List<String> command;
+
+		public GruntThread( String... commands ){
+			this.command = Arrays.asList(commands);
+			this.setDaemon(true);
 		}
-		return null;
+
+		public void interrupt(){
+			if (process != null) process.destroy();
+			super.interrupt();
+		}
+
+		public void run() {
+			try {
+				VirtualFile gruntHome = Play.getVirtualFile( Play.configuration.getProperty("grunt.home", "") );
+				if( gruntHome == null ){
+					Logger.error("[Grunt] unable to find Grunt home (using grunt.home in application.conf): %s", Play.configuration.getProperty("grunt.home"));
+					return;
+				}
+				process = new ProcessBuilder(command).directory(gruntHome.getRealFile()).redirectErrorStream(false).start();
+
+				if( "true".equals(Play.configuration.getProperty("grunt.log", "false")) ){
+					InputStream in = process.getInputStream();
+					StringWriter out = new StringWriter();
+					String message;
+					int d;
+					while ((d = in.read()) != -1) {
+						out.write(d);
+						if( in.available() == 0 ){
+							message = out.toString();
+							if( message.length() > 0 ){
+								String[] lines = message.split("\n");
+								for( String m: lines ){
+									Logger.info("[Grunt] %s", m);
+								}
+							}
+							out = new StringWriter();
+						}
+					}
+				}
+
+			} catch (InterruptedIOException iex ){
+				if (process != null)
+					process.destroy();
+			} catch (IOException ex) {
+				Logger.error( ex, "[Grunt]" );
+			}
+		}
 	}
 
-	private void inputStreamToOutputStream(final InputStream inputStream, final OutputStream out) {
-		loggerThread = new Thread(new Runnable() {
-			public void run() {
-				try {
-					int d;
-					while ((d = inputStream.read()) != -1) {
-						out.write(d);
-					}
-				} catch (IOException ex) {
-					//TODO make a callback on exception.
-				}
-			}
-		});
-		loggerThread.setDaemon(true);
-		loggerThread.start();
-	}
 }
